@@ -1,0 +1,496 @@
+import { expect } from "chai";
+
+import { atTime, holdClock, Offline } from "../../test/helper/Offline.js";
+import { ToneAudioBuffer } from "../core/context/ToneAudioBuffer.js";
+import { getContext } from "../core/Global.js";
+import { noOp } from "../core/util/Interface.js";
+import { Player } from "./buffer/Player.js";
+import { Oscillator } from "./oscillator/Oscillator.js";
+
+describe("Source", () => {
+	it("can be started and stopped", () => {
+		const source = new Oscillator();
+		source.start(0);
+		source.stop(1);
+		source.dispose();
+	});
+
+	it("can be constructed with an options object", () => {
+		const source = new Oscillator({
+			volume: -20,
+		});
+		expect(source.volume.value).to.be.closeTo(-20, 0.1);
+		source.dispose();
+	});
+
+	it("can be muted in the constructor options", () => {
+		const source = new Oscillator({
+			mute: true,
+		});
+		expect(source.mute).to.be.true;
+		source.dispose();
+	});
+
+	it("can set the volume", () => {
+		const source = new Oscillator();
+		source.volume.value = -8;
+		expect(source.volume.value).to.be.closeTo(-8, 0.1);
+		source.dispose();
+	});
+
+	it("can mute and unmute the source", () => {
+		const source = new Oscillator();
+		source.volume.value = -8;
+		source.mute = true;
+		expect(source.mute).to.be.true;
+		expect(source.volume.value).to.equal(-Infinity);
+		source.mute = false;
+		// returns the volume to what it was
+		expect(source.volume.value).to.be.closeTo(-8, 0.1);
+		source.dispose();
+	});
+
+	it("can get and set values with an object", () => {
+		const source = new Oscillator();
+		source.set({ volume: -10 });
+		expect(source.get().volume).to.be.closeTo(-10, 0.1);
+		source.dispose();
+	});
+
+	it("is initially stopped", () => {
+		const source = new Oscillator();
+		expect(source.state).to.equal("stopped");
+		source.dispose();
+	});
+
+	it("cannot be scheduled to stop/start twice in a row", () => {
+		return Offline(() => {
+			const source = new Oscillator();
+			source.start(0).start(1);
+			source.stop(2).stop(3);
+			source.dispose();
+		});
+	});
+
+	it("can be scheduled with multiple starts/stops", () => {
+		return Offline(() => {
+			const source = new Oscillator();
+			source.start(0).stop(0.5).start(0.75).stop(1).start(1.25).stop(1.5);
+			return [
+				atTime(0.1, () => {
+					expect(source.state).to.equal("started");
+				}),
+				atTime(0.5, () => {
+					expect(source.state).to.equal("stopped");
+				}),
+				atTime(0.8, () => {
+					expect(source.state).to.equal("started");
+				}),
+				atTime(1, () => {
+					expect(source.state).to.equal("stopped");
+				}),
+				atTime(1.25, () => {
+					expect(source.state).to.equal("started");
+				}),
+				atTime(1.6, () => {
+					expect(source.state).to.equal("stopped");
+				}),
+			];
+		}, 2);
+	});
+
+	it("clamps start time to the currentTime", (done) => {
+		const source = new Oscillator();
+		expect(source.state).to.equal("stopped");
+		source.start(0);
+		setTimeout(() => {
+			expect(source.state).to.equal("started");
+			source.dispose();
+			done();
+		}, 10);
+	});
+
+	it("clamps stop time to the currentTime", (done) => {
+		const source = new Oscillator();
+		expect(source.state).to.equal("stopped");
+		source.start(0);
+		setTimeout(() => {
+			expect(source.state).to.equal("started");
+			source.stop(0);
+			setTimeout(() => {
+				expect(source.state).to.equal("stopped");
+				source.dispose();
+				done();
+			}, 10);
+		}, 10);
+	});
+
+	it("correctly returns the scheduled play state", () => {
+		return Offline(() => {
+			const source = new Oscillator();
+			expect(source.state).to.equal("stopped");
+			source.start(0).stop(0.5);
+
+			return (time) => {
+				if (time >= 0 && time < 0.5) {
+					expect(source.state).to.equal("started");
+				} else if (time > 0.5) {
+					expect(source.state).to.equal("stopped");
+				}
+			};
+		}, 0.6);
+	});
+
+	it("start needs to be greater than the previous start time", () => {
+		return Offline(() => {
+			const source = new Oscillator();
+			source.start(0);
+			expect(() => {
+				source.start(0);
+			}).to.throw(Error);
+			source.dispose();
+		});
+	});
+
+	context("sync", () => {
+		const ramp = new Float32Array(getContext().sampleRate);
+		ramp.forEach((val, index) => {
+			ramp[index] = index / getContext().sampleRate;
+		});
+		const rampBuffer = ToneAudioBuffer.fromArray(ramp);
+
+		it("can sync its start to the transport", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0);
+				expect(source.state).to.equal("stopped");
+				transport.start(source.now());
+				expect(source.state).to.equal("started");
+				source.dispose();
+				transport.stop();
+			});
+		});
+
+		it("calling sync multiple times has no affect", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().sync().start(0);
+				expect(source.state).to.equal("stopped");
+				transport.start(source.now());
+				expect(source.state).to.equal("started");
+				source.dispose();
+				transport.stop();
+			});
+		});
+
+		it("can unsync after it was synced", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0);
+				source.unsync();
+				transport.start();
+				expect(source.state).to.equal("stopped");
+			});
+		});
+
+		it("calling unsync multiple times has no affect", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0);
+				source.unsync().unsync();
+				transport.start();
+				expect(source.state).to.equal("stopped");
+			});
+		});
+
+		it("can sync its stop to the transport", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0);
+				expect(source.state).to.equal("stopped");
+				transport.start(0).stop(0.4);
+				expect(source.state).to.equal("started");
+
+				return (time) => {
+					if (time > 0.4) {
+						expect(source.state).to.equal("stopped");
+					}
+				};
+			}, 0.5);
+		});
+
+		it("can schedule multiple starts/stops", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0.1).stop(0.2).start(0.3);
+				transport.start(0).stop(0.4);
+				expect(source.state).to.equal("stopped");
+
+				return (time) => {
+					if (time > 0.1 && time < 0.19) {
+						expect(source.state).to.equal("started");
+					} else if (time > 0.2 && time < 0.29) {
+						expect(source.state).to.equal("stopped");
+					} else if (time > 0.3 && time < 0.39) {
+						expect(source.state).to.equal("started");
+					} else if (time > 0.4) {
+						expect(source.state).to.equal("stopped");
+					}
+				};
+			}, 0.6);
+		});
+
+		it.skip("can sync schedule multiple starts", () => {
+			return Offline(({ transport }) => {
+				const buff = ToneAudioBuffer.fromArray(
+					new Float32Array(1024).map((v) => 1)
+				);
+				const source = new Player(buff);
+				source.sync().start(0.1).start(0.3);
+				transport.start(0);
+				expect(source.state).to.equal("stopped");
+
+				return [
+					atTime(0.11, () => {
+						expect(source.state).to.equal("started");
+					}),
+					atTime(0.31, () => {
+						expect(source.state).to.equal("started");
+					}),
+				];
+			}, 0.6);
+		});
+
+		it("has correct offset when the transport is started with an offset", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0.3).stop(0.4);
+				transport.start(0, 0.1);
+				expect(source.state).to.equal("stopped");
+
+				return (time) => {
+					if (time > 0.21 && time < 0.29) {
+						expect(source.state).to.equal("started");
+					} else if (time > 0.31) {
+						expect(source.state).to.equal("stopped");
+					}
+				};
+			}, 0.5);
+		});
+
+		it("can start with an offset after the start time of the source", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0);
+				transport.start(0, 0.1);
+				expect(source.state).to.equal("started");
+				source.dispose();
+			}, 0.1);
+		});
+
+		it("can sync its start to the transport after a delay", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0.3);
+				transport.start(0).stop(0.4);
+				expect(source.state).to.equal("stopped");
+
+				return (time) => {
+					if (time > 0.3 && time < 0.39) {
+						expect(source.state).to.equal("started");
+					} else if (time > 0.4) {
+						expect(source.state).to.equal("stopped");
+					}
+				};
+			}, 0.6);
+		});
+
+		it("correct state when the transport position is changed", () => {
+			return Offline(({ transport }) => {
+				const source = new Oscillator();
+				source.sync().start(0.3).stop(0.4);
+				transport.start(0).stop(0.4);
+				expect(source.state).to.equal("stopped");
+				transport.seconds = 0.305;
+				expect(source.state).to.equal("started");
+				transport.seconds = 0.405;
+				return atTime(0.01, () => {
+					expect(source.state).to.equal("stopped");
+				});
+			}, 0.1);
+		});
+
+		it("gives the correct offset on time on start/stop events", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2, 0.1).stop(0.3);
+				transport.start(0.2);
+			}, 0.7);
+			expect(output.getValueAtTime(0.41)).to.be.closeTo(0.1, 0.01);
+			expect(output.getValueAtTime(0.45)).to.be.closeTo(0.15, 0.001);
+			expect(output.getValueAtTime(0.5)).to.be.equal(0);
+		});
+
+		it("stops the playing source when the transport is stopped and restarted at the same time", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0);
+				transport.start(0);
+				return atTime(
+					0.2,
+					holdClock(transport, (time) => {
+						transport.stop(time);
+						transport.start(time, 0.5);
+					})
+				);
+			}, 0.5);
+			// before the restart the ramp plays from 0
+			expect(output.getValueAtTime(0.1)).to.be.closeTo(0.1, 0.01);
+			// after the restart only the source started at offset 0.5 plays;
+			// if the first source were orphaned the two ramps would sum
+			expect(output.getValueAtTime(0.3)).to.be.closeTo(0.6, 0.01);
+			expect(output.getValueAtTime(0.4)).to.be.closeTo(0.7, 0.01);
+		});
+
+		it("stops a source whose start was pending in the same clock update as a pause (#1289)", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.5);
+				transport.start(0);
+				// the clip's start tick at 0.5 and the pause at ~0.52 are
+				// processed in the same clock update
+				return atTime(
+					0.52,
+					holdClock(transport, (time) => {
+						transport.pause(time);
+					})
+				);
+			}, 1);
+			expect(output.getValueAtTime(0.7)).to.equal(0);
+			expect(output.getValueAtTime(0.9)).to.equal(0);
+		});
+
+		it("stops a source whose start was pending in the same clock update as a stop (#1289)", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.5);
+				transport.start(0);
+				return atTime(
+					0.52,
+					holdClock(transport, (time) => {
+						transport.stop(time);
+					})
+				);
+			}, 1);
+			expect(output.getValueAtTime(0.7)).to.equal(0);
+			expect(output.getValueAtTime(0.9)).to.equal(0);
+		});
+
+		it("stops a source whose start was pending in the same clock update as a stop scheduled ahead of time", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.5);
+				transport.start(0);
+				// stop scheduled in advance; the start tick at 0.5 and the
+				// stop at 0.52 are both pending when the clock catches up
+				transport.stop(0.52);
+				return atTime(0.55, holdClock(transport, noOp));
+			}, 1);
+			expect(output.getValueAtTime(0.51)).to.be.closeTo(0.01, 0.005);
+			expect(output.getValueAtTime(0.7)).to.equal(0);
+			expect(output.getValueAtTime(0.9)).to.equal(0);
+		});
+
+		it("gives the correct offset on time on start/stop events when started with an offset", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2, 0.1).stop(0.4);
+				transport.start(0.2, 0.1);
+			}, 0.7);
+			expect(output.getValueAtTime(0.21)).to.be.closeTo(0.0, 0.01);
+			expect(output.getValueAtTime(0.31)).to.be.closeTo(0.1, 0.01);
+			expect(output.getValueAtTime(0.41)).to.be.closeTo(0.2, 0.01);
+			expect(output.getValueAtTime(0.45)).to.be.closeTo(0.25, 0.01);
+			expect(output.getValueAtTime(0.51)).to.be.equal(0);
+		});
+
+		it("gives the correct offset on time on start/stop events invoked with a transport offset that's in the middle of the event", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2, 0.1).stop(0.4);
+				transport.start(0, 0.3);
+			}, 0.7);
+			expect(output.getValueAtTime(0.01)).to.be.closeTo(0.2, 0.01);
+			expect(output.getValueAtTime(0.05)).to.be.closeTo(0.25, 0.01);
+			expect(output.getValueAtTime(0.11)).to.be.equal(0);
+		});
+
+		it("gives the correct duration when invoked with a transport offset that's in the middle of the event", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2, 0.1, 0.3);
+				transport.start(0, 0.3);
+			}, 0.7);
+			expect(output.getValueAtTime(0.01)).to.be.closeTo(0.2, 0.01);
+			expect(output.getValueAtTime(0.1)).to.be.closeTo(0.3, 0.01);
+			expect(output.getValueAtTime(0.199)).to.be.closeTo(0.4, 0.01);
+			expect(output.getValueAtTime(0.31)).to.be.equal(0);
+		});
+
+		it("stops at the right time when transport.stop is invoked before the scheduled stop", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2).stop(0.4);
+				transport.start(0).stop(0.3);
+			}, 0.7);
+			expect(output.getValueAtTime(0.2)).to.be.closeTo(0.0, 0.01);
+			expect(output.getValueAtTime(0.25)).to.be.closeTo(0.05, 0.01);
+			expect(output.getValueAtTime(0.31)).to.be.equal(0);
+		});
+
+		it("invokes the right methods and offsets when the transport is seeked", async () => {
+			const output = await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.sync().start(0.2);
+				transport.start(0, 0.3);
+
+				return atTime(0.1, () => {
+					// seek forward in time
+					transport.seconds = 0.1;
+				});
+			}, 0.7);
+			expect(output.getValueAtTime(0.01)).to.be.closeTo(0.1, 0.01);
+			expect(output.getValueAtTime(0.05)).to.be.closeTo(0.15, 0.01);
+			expect(output.getValueAtTime(0.11)).to.be.closeTo(0.0, 0.01);
+			expect(output.getValueAtTime(0.21)).to.be.closeTo(0.0, 0.01);
+			expect(output.getValueAtTime(0.25)).to.be.closeTo(0.05, 0.01);
+			expect(output.getValueAtTime(0.3)).to.be.closeTo(0.1, 0.01);
+		});
+
+		it("does not replay a clip synced at time 0 after stopping and restarting at a later offset (#1417)", async () => {
+			let onStopCount = 0;
+			await Offline(({ transport }) => {
+				const source = new Player(rampBuffer).toDestination();
+				source.onstop = () => {
+					onStopCount++;
+				};
+				// rampBuffer duration is 1s. Sync at time 0 with duration 0.2s.
+				// This clip only spans [0, 0.2]. At transport time 0.4, it is over.
+				source.sync().start(0, 0, 0.2);
+				transport.start(0, 0);
+
+				return [
+					atTime(0.25, () => {
+						transport.stop();
+					}),
+					atTime(0.3, () => {
+						// restart past the clip duration at offset 0.4
+						transport.start(0.3, 0.4);
+					}),
+				];
+			}, 0.5);
+
+			expect(onStopCount).to.equal(1);
+		});
+	});
+});
